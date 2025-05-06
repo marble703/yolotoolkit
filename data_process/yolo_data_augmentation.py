@@ -19,6 +19,7 @@ import torch
 from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFile
+from PIL import ImageFilter
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 from torchvision import transforms
 import numpy as np
@@ -27,6 +28,7 @@ import os
 import random
 import shutil
 from tqdm import tqdm
+import concurrent.futures
 
 random.seed(0)
 
@@ -135,6 +137,17 @@ class DataAugmentationOnDetection:
             return img, torch.cat([label.reshape([-1, 1]), boxes], dim=1)
         else:
             return img, boxes
+
+    def gaussian_blur(self, img, boxes, radius=2):
+        """
+        对图像应用高斯模糊
+        Args:
+            img: PIL.Image 类型
+            boxes: Tensor 类型，yolo格式的框
+            radius: 模糊半径
+        """
+        blurred_img = img.filter(ImageFilter.GaussianBlur(radius))
+        return blurred_img, boxes
 
     # ------------------------------------------------------
     # 以下img皆为Tensor类型
@@ -401,25 +414,25 @@ class DataAugmentationOnDetection:
             # 根据方向移动图像内容
             if direction == 'right':
                 # 右移：右侧部分留空（黑色），左侧部分移入
-                if shift_distance >= box_region.shape[1]:
+                if (shift_distance >= box_region.shape[1]):
                     shift_distance = box_region.shape[1] - 1
                 shifted_region = np.zeros_like(box_region)
                 shifted_region[:, shift_distance:] = box_region[:, :-shift_distance]
             elif direction == 'left':
                 # 左移：左侧部分留空（黑色），右侧部分移入
-                if shift_distance >= box_region.shape[1]:
+                if (shift_distance >= box_region.shape[1]):
                     shift_distance = box_region.shape[1] - 1
                 shifted_region = np.zeros_like(box_region)
                 shifted_region[:, :-shift_distance] = box_region[:, shift_distance:]
             elif direction == 'down':
                 # 下移：底部留空（黑色），上部分移入
-                if shift_distance >= box_region.shape[0]:
+                if (shift_distance >= box_region.shape[0]):
                     shift_distance = box_region.shape[0] - 1
                 shifted_region = np.zeros_like(box_region)
                 shifted_region[shift_distance:, :] = box_region[:-shift_distance, :]
             elif direction == 'up':
                 # 上移：顶部留空（黑色），下部分移入
-                if shift_distance >= box_region.shape[0]:
+                if (shift_distance >= box_region.shape[0]):
                     shift_distance = box_region.shape[0] - 1
                 shifted_region = np.zeros_like(box_region)
                 shifted_region[:-shift_distance, :] = box_region[shift_distance:, :]
@@ -571,6 +584,148 @@ class DataAugmentationOnDetection:
         
         return result_img, torch.tensor(adjusted_boxes)
 
+    def add_horizontal_occlusion(self, img, boxes, height_ratio=0.2, color='black'):
+        """
+        在标注框中添加横向遮挡条
+        Args:
+            img: PIL.Image 类型
+            boxes: Tensor 类型，yolo格式的框
+            height_ratio: 遮挡条高度占标注框高度的比例
+            color: 遮挡颜色，'white'或'black'
+        """
+        if len(boxes) == 0:
+            return img, boxes
+            
+        img_copy = img.copy()
+        w, h = img_copy.size
+        draw = ImageDraw.Draw(img_copy)
+        
+        for i in range(len(boxes)):
+            # 提取框信息（YOLO格式：class, x_center, y_center, width, height）
+            label, x_center, y_center, width, height = boxes[i]
+            
+            # 计算框的绝对坐标
+            x1 = int((x_center - width/2) * w)
+            y1 = int((y_center - height/2) * h)
+            x2 = int((x_center + width/2) * w)
+            y2 = int((y_center + height/2) * h)
+            
+            # 确保坐标在图像范围内
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w, x2)
+            y2 = min(h, y2)
+            
+            # 计算遮挡条的高度
+            occlusion_height = int((y2 - y1) * height_ratio)
+            if occlusion_height < 1:
+                occlusion_height = 1
+            
+            # 计算遮挡条的位置（居中放置）
+            occlusion_y = y1 + (y2 - y1) // 2 - occlusion_height // 2
+            
+            # 确定颜色
+            if color == 'white':
+                fill_color = (255, 255, 255)  # 白色
+            else:  # 黑色
+                fill_color = (0, 0, 0)  # 黑色
+                
+            # 绘制遮挡条
+            draw.rectangle([x1, occlusion_y, x2, occlusion_y + occlusion_height], fill=fill_color)
+            
+        # 边界框不需要修改，因为目标的位置没有变化，只是被部分遮挡
+        return img_copy, boxes
+        
+    def add_vertical_occlusion(self, img, boxes, width_ratio=0.2, color='black'):
+        """
+        在标注框中添加纵向遮挡条
+        Args:
+            img: PIL.Image 类型
+            boxes: Tensor 类型，yolo格式的框
+            width_ratio: 遮挡条宽度占标注框宽度的比例
+            color: 遮挡颜色，'white'或'black'
+        """
+        if len(boxes) == 0:
+            return img, boxes
+            
+        img_copy = img.copy()
+        w, h = img.copy().size
+        draw = ImageDraw.Draw(img_copy)
+        
+        for i in range(len(boxes)):
+            # 提取框信息（YOLO格式：class, x_center, y_center, width, height）
+            label, x_center, y_center, width, height = boxes[i]
+            
+            # 计算框的绝对坐标
+            x1 = int((x_center - width/2) * w)
+            y1 = int((y_center - height/2) * h)
+            x2 = int((x_center + width/2) * w)
+            y2 = int((y_center + height/2) * h)
+            
+            # 确保坐标在图像范围内
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w, x2)
+            y2 = min(h, y2)
+            
+            # 计算遮挡条的宽度
+            occlusion_width = int((x2 - x1) * width_ratio)
+            if occlusion_width < 1:
+                occlusion_width = 1
+            
+            # 计算遮挡条的位置（居中放置）
+            occlusion_x = x1 + (x2 - x1) // 2 - occlusion_width // 2
+            
+            # 确定颜色
+            if color == 'white':
+                fill_color = (255, 255, 255)  # 白色
+            else:  # 黑色
+                fill_color = (0, 0, 0)  # 黑色
+                
+            # 绘制遮挡条
+            draw.rectangle([occlusion_x, y1, occlusion_x + occlusion_width, y2], fill=fill_color)
+            
+        # 边界框不需要修改，因为目标的位置没有变化，只是被部分遮挡
+        return img_copy, boxes
+
+    def add_cross_occlusion(self, img, boxes, width_ratio=0.15, height_ratio=0.15, color='black'):
+        """
+        在标注框中添加十字形遮挡（横向+纵向）
+        Args:
+            img: PIL.Image 类型
+            boxes: Tensor 类型，yolo格式的框
+            width_ratio: 纵向遮挡条宽度占标注框宽度的比例
+            height_ratio: 横向遮挡条高度占标注框高度的比例
+            color: 遮挡颜色，'white'或'black'
+        """
+        # 先添加横向遮挡
+        img_h_occluded, _ = self.add_horizontal_occlusion(img, boxes, height_ratio, color)
+        # 再添加纵向遮挡
+        return self.add_vertical_occlusion(img_h_occluded, boxes, width_ratio, color)
+
+    def adjust_gamma(self, img, gamma=1.0):
+        """
+        调整图像的伽马值，实现增强曝光或降低曝光的效果
+        Args:
+            img: PIL.Image 类型
+            gamma: 伽马值，小于1时增强曝光(图像变亮)，大于1时降低曝光(图像变暗)
+        """
+        # 将PIL图像转换为numpy数组进行处理
+        img_np = np.array(img).astype(np.float32) / 255.0
+        
+        # 应用伽马变换
+        img_np = np.power(img_np, gamma)
+        
+        # 确保值在[0,1]范围内
+        img_np = np.clip(img_np, 0, 1)
+        
+        # 转回uint8并重新创建PIL图像
+        img_np = (img_np * 255).astype(np.uint8)
+        adjusted_img = Image.fromarray(img_np)
+        
+        # 伽马调整只改变像素值，不会影响边界框坐标
+        return adjusted_img
+
 
 def plot_pics(img, boxes):
     # 显示图像和候选框，img是Image.Open()类型, boxes是Tensor类型
@@ -639,12 +794,13 @@ def save_Yolo(img, boxes, save_path, prefix, image_name):
         print("ERROR: ", image_name, " is bad.")
 
 
-def runAugumentation(dataset_path, save_path):
+def runAugumentation(dataset_path, save_path, max_workers=4):
     """
-    对YOLO格式数据集进行数据增强
+    对YOLO格式数据集进行数据增强，使用并发处理多张图片
     Args:
         dataset_path: YOLO数据集根目录，需包含images和labels文件夹
         save_path: 增强后的数据集保存路径
+        max_workers: 最大并发进程数
     """
     image_path = os.path.join(dataset_path, "images")
     label_path = os.path.join(dataset_path, "labels")
@@ -678,7 +834,9 @@ def runAugumentation(dataset_path, save_path):
     # 创建数据增强对象
     DAD = DataAugmentationOnDetection()
     
-    # 复制原始图像到输出目录
+    # 保存原始图像到输出目录并加载所有图像数据
+    print("正在复制原始图像到输出目录...")
+    image_data = []
     for idx, image_name in enumerate(image_list, 1):
         img = Image.open(os.path.join(image_path, image_name))
         boxes = get_label_file(label_path, image_name)
@@ -687,104 +845,141 @@ def runAugumentation(dataset_path, save_path):
         # 保存原始图像
         save_Yolo(img, boxes, save_path, "", image_name)
         
-        print(f"\n处理图像 [{idx}/{total_augmentations}]: {image_name}")
+        # 只有当图像有标注框时才收集用于增强
+        if len(boxes) > 0:
+            image_data.append((img, boxes, image_name))
+            
+    print(f"共有 {len(image_data)} 张带标注框的图像需要增强处理")
+    
+    # 使用ProcessPoolExecutor进行并发处理
+    print("开始并发数据增强处理...")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 创建任务
+        futures = []
+        for img, boxes, image_name in image_data:
+            futures.append(
+                executor.submit(process_single_image, img, boxes, save_path, image_name, DAD)
+            )
         
-        # 应用数据增强
-        if len(boxes) > 0:  # 只有当图像有标注框时才进行增强
-            # 1. 水平翻转 (固定翻转)
-            flipped_img, flipped_boxes = DAD.random_flip_horizon(img.copy(), boxes.clone())
-            save_Yolo(flipped_img, flipped_boxes, save_path, "h_flip_", image_name)
-                
-            # 2. 垂直翻转 (固定翻转)
-            flipped_img, flipped_boxes = DAD.random_flip_vertical(img.copy(), boxes.clone())
-            save_Yolo(flipped_img, flipped_boxes, save_path, "v_flip_", image_name)
-            
-            # 3. 拉伸图像 (横向拉伸)
-            stretched_img, stretched_boxes = DAD.stretch_image(img.copy(), boxes.clone(), x_rate=1.2, y_rate=1.0)
-            save_Yolo(stretched_img, stretched_boxes, save_path, "stretch_x_", image_name)
-            
-            # 4. 拉伸图像 (纵向拉伸)
-            stretched_img, stretched_boxes = DAD.stretch_image(img.copy(), boxes.clone(), x_rate=1.0, y_rate=1.2)
-            save_Yolo(stretched_img, stretched_boxes, save_path, "stretch_y_", image_name)
-            
-            # 5. 亮度和对比度变化 (对tensor进行操作)
-            img_tensor = transforms.ToTensor()(img)
-            
-            # 亮度增强
-            bright_tensor = DAD.random_bright(img_tensor.clone(), u=50, p=1.0)
-            bright_img = transforms.ToPILImage()(bright_tensor)
-            save_Yolo(bright_img, boxes, save_path, "bright_", image_name)
-            
-            # 对比度增强
-            contrast_tensor = DAD.random_contrast(img_tensor.clone(), lower=1.2, upper=1.5, p=1.0)
-            contrast_img = transforms.ToPILImage()(contrast_tensor)
-            save_Yolo(contrast_img, boxes, save_path, "contrast_", image_name)
-            
-            # 添加噪声
-            noise_tensor = DAD.add_salt_noise(img_tensor.clone())
-            noise_img = transforms.ToPILImage()(noise_tensor)
-            save_Yolo(noise_img, boxes, save_path, "noise_", image_name)
-            
-            # 6. 旋转图像和边界框
-            # 旋转15度
-            rotated_img, rotated_boxes = DAD.rotate_image_and_boxes(img.copy(), boxes.clone(), 15)
-            save_Yolo(rotated_img, rotated_boxes, save_path, "rot15_", image_name)
-            
-            # 旋转30度
-            rotated_img, rotated_boxes = DAD.rotate_image_and_boxes(img.copy(), boxes.clone(), 30)
-            save_Yolo(rotated_img, rotated_boxes, save_path, "rot30_", image_name)
-            
-            # 旋转-15度
-            rotated_img, rotated_boxes = DAD.rotate_image_and_boxes(img.copy(), boxes.clone(), -15)
-            save_Yolo(rotated_img, rotated_boxes, save_path, "rot-15_", image_name)
-            
-            # 旋转-30度
-            rotated_img, rotated_boxes = DAD.rotate_image_and_boxes(img.copy(), boxes.clone(), -30)
-            save_Yolo(rotated_img, rotated_boxes, save_path, "rot-30_", image_name)
-            
-            # 7. 随机白色遮挡
-            occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=2, size_range=(0.1, 0.2), color='white')
-            save_Yolo(occluded_img, occluded_boxes, save_path, "occ_w_", image_name)
-            
-            # 8. 随机黑色遮挡
-            occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=2, size_range=(0.1, 0.2), color='black')
-            save_Yolo(occluded_img, occluded_boxes, save_path, "occ_b_", image_name)
-            
-            # 9. 随机黑白混合遮挡
-            occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=3, size_range=(0.05, 0.15), color='random')
-            save_Yolo(occluded_img, occluded_boxes, save_path, "occ_mix_", image_name)
-            
-            # 10. 将标注框内图像向右移动
-            shifted_img, shifted_boxes = DAD.shift_box_content(img.copy(), boxes.clone(), direction='right', shift_ratio=0.1)
-            save_Yolo(shifted_img, shifted_boxes, save_path, "shift_r_", image_name)
-            
-            # 11. 将标注框内图像向左移动
-            shifted_img, shifted_boxes = DAD.shift_box_content(img.copy(), boxes.clone(), direction='left', shift_ratio=0.1)
-            save_Yolo(shifted_img, shifted_boxes, save_path, "shift_l_", image_name)
-            
-            # 12. 将标注框内图像向上移动
-            shifted_img, shifted_boxes = DAD.shift_box_content(img.copy(), boxes.clone(), direction='up', shift_ratio=0.1)
-            save_Yolo(shifted_img, shifted_boxes, save_path, "shift_u_", image_name)
-            
-            # 13. 将标注框内图像向下移动
-            shifted_img, shifted_boxes = DAD.shift_box_content(img.copy(), boxes.clone(), direction='down', shift_ratio=0.1)
-            save_Yolo(shifted_img, shifted_boxes, save_path, "shift_d_", image_name)
-            
-            # # 14. 旋转整张图像30度，但保持标注框区域不旋转
-            # rotated_img, rotated_boxes = DAD.rotate_except_boxes(img.copy(), boxes.clone(), angle=15)
-            # save_Yolo(rotated_img, rotated_boxes, save_path, "rot_ex15_", image_name)
-            
-            # # 15. 旋转整张图像-30度，但保持标注框区域不旋转
-            # rotated_img, rotated_boxes = DAD.rotate_except_boxes(img.copy(), boxes.clone(), angle=-15)
-            # save_Yolo(rotated_img, rotated_boxes, save_path, "rot_ex-15_", image_name)
-
+        # 显示进度条
+        for i, future in enumerate(tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="数据增强进度")):
+            try:
+                # 获取任务结果（如果有任何异常会在这里抛出）
+                future.result()
+            except Exception as e:
+                print(f"处理图像时发生错误: {e}")
+    
     total_files = len(os.listdir(os.path.join(save_path, "images")))
     print(f"\n数据增强完成！总共生成 {total_files} 张图像。")
 
+def process_single_image(img, boxes, save_path, image_name, DAD):
+    """
+    对单张图片进行数据增强处理
+    Args:
+        img: 原始图像 (PIL.Image)
+        boxes: 边界框 (Tensor)
+        save_path: 保存路径
+        image_name: 图像文件名
+        DAD: DataAugmentationOnDetection对象
+    """
+    # 只有当图像有标注框时才进行增强
+    if len(boxes) == 0:
+        return
+        
+    # 1. 水平翻转 (固定翻转)
+    flipped_img, flipped_boxes = DAD.random_flip_horizon(img.copy(), boxes.clone())
+    save_Yolo(flipped_img, flipped_boxes, save_path, "h_flip_", image_name)
+        
+    # 2. 垂直翻转 (固定翻转)
+    flipped_img, flipped_boxes = DAD.random_flip_vertical(img.copy(), boxes.clone())
+    save_Yolo(flipped_img, flipped_boxes, save_path, "v_flip_", image_name)
+    
+    # 3. 拉伸图像 (横向拉伸)
+    stretched_img, stretched_boxes = DAD.stretch_image(img.copy(), boxes.clone(), x_rate=1.2, y_rate=1.0)
+    save_Yolo(stretched_img, stretched_boxes, save_path, "stretch_x_", image_name)
+    
+    # 4. 拉伸图像 (纵向拉伸)
+    stretched_img, stretched_boxes = DAD.stretch_image(img.copy(), boxes.clone(), x_rate=1.0, y_rate=1.2)
+    save_Yolo(stretched_img, stretched_boxes, save_path, "stretch_y_", image_name)
+    
+    # 5. 亮度和对比度变化 (对tensor进行操作)
+    img_tensor = transforms.ToTensor()(img)
+    
+    # 亮度增强
+    bright_tensor = DAD.random_bright(img_tensor.clone(), u=50, p=1.0)
+    bright_img = transforms.ToPILImage()(bright_tensor)
+    save_Yolo(bright_img, boxes, save_path, "bright_", image_name)
+    
+    # 对比度增强
+    contrast_tensor = DAD.random_contrast(img_tensor.clone(), lower=1.2, upper=1.5, p=1.0)
+    contrast_img = transforms.ToPILImage()(contrast_tensor)
+    save_Yolo(contrast_img, boxes, save_path, "contrast_", image_name)
+    
+    # 添加噪声
+    noise_tensor = DAD.add_salt_noise(img_tensor.clone())
+    noise_img = transforms.ToPILImage()(noise_tensor)
+    save_Yolo(noise_img, boxes, save_path, "noise_", image_name)
+    
+    # 6. 高斯模糊
+    blurred_img, blurred_boxes = DAD.gaussian_blur(img.copy(), boxes.clone(), radius=2)
+    save_Yolo(blurred_img, blurred_boxes, save_path, "gaussian_", image_name)
+    
+    # 7. 随机白色遮挡
+    occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=2, size_range=(0.1, 0.2), color='white')
+    save_Yolo(occluded_img, occluded_boxes, save_path, "occ_w_", image_name)
+    
+    # 8. 随机黑色遮挡
+    occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=2, size_range=(0.1, 0.2), color='black')
+    save_Yolo(occluded_img, occluded_boxes, save_path, "occ_b_", image_name)
+    
+    # 9. 随机黑白混合遮挡
+    occluded_img, occluded_boxes = DAD.random_occlusion(img.copy(), boxes.clone(), num_rectangles=3, size_range=(0.05, 0.15), color='random')
+    save_Yolo(occluded_img, occluded_boxes, save_path, "occ_mix_", image_name)
+    
+    # 14. 添加标注框横向遮挡
+    horiz_occluded_img, horiz_occluded_boxes = DAD.add_horizontal_occlusion(img.copy(), boxes.clone(), height_ratio=0.2, color='black')
+    save_Yolo(horiz_occluded_img, horiz_occluded_boxes, save_path, "h_occ_b_", image_name)
+    
+    # 15. 添加标注框横向遮挡（白色）
+    horiz_occluded_img, horiz_occluded_boxes = DAD.add_horizontal_occlusion(img.copy(), boxes.clone(), height_ratio=0.2, color='white')
+    save_Yolo(horiz_occluded_img, horiz_occluded_boxes, save_path, "h_occ_w_", image_name)
+    
+    # 16. 添加标注框纵向遮挡
+    vert_occluded_img, vert_occluded_boxes = DAD.add_vertical_occlusion(img.copy(), boxes.clone(), width_ratio=0.2, color='black')
+    save_Yolo(vert_occluded_img, vert_occluded_boxes, save_path, "v_occ_b_", image_name)
+    
+    # 17. 添加标注框纵向遮挡（白色）
+    vert_occluded_img, vert_occluded_boxes = DAD.add_vertical_occlusion(img.copy(), boxes.clone(), width_ratio=0.2, color='white')
+    save_Yolo(vert_occluded_img, vert_occluded_boxes, save_path, "v_occ_w_", image_name)
+    
+    # 18. 添加标注框十字形遮挡
+    cross_occluded_img, cross_occluded_boxes = DAD.add_cross_occlusion(img.copy(), boxes.clone(), width_ratio=0.15, height_ratio=0.15, color='black')
+    save_Yolo(cross_occluded_img, cross_occluded_boxes, save_path, "cross_occ_b_", image_name)
+    
+    # 19. 添加标注框十字形遮挡（白色）
+    cross_occluded_img, cross_occluded_boxes = DAD.add_cross_occlusion(img.copy(), boxes.clone(), width_ratio=0.15, height_ratio=0.15, color='white')
+    save_Yolo(cross_occluded_img, cross_occluded_boxes, save_path, "cross_occ_w_", image_name)
+
+    # 20. 增强曝光 (小伽马值，图像变亮)
+    bright_gamma_img = DAD.adjust_gamma(img.copy(), gamma=0.7)
+    save_Yolo(bright_gamma_img, boxes, save_path, "gamma_bright_", image_name)
+    
+    # 21. 降低曝光 (大伽马值，图像变暗)
+    dark_gamma_img = DAD.adjust_gamma(img.copy(), gamma=1.5)
+    save_Yolo(dark_gamma_img, boxes, save_path, "gamma_dark_", image_name)
+    
+    # 22. 更强曝光 (更小的伽马值)
+    very_bright_gamma_img = DAD.adjust_gamma(img.copy(), gamma=0.5)
+    save_Yolo(very_bright_gamma_img, boxes, save_path, "gamma_very_bright_", image_name)
+    
+    # 23. 更暗曝光 (更大的伽马值) 
+    very_dark_gamma_img = DAD.adjust_gamma(img.copy(), gamma=2.0)
+    save_Yolo(very_dark_gamma_img, boxes, save_path, "gamma_very_dark_", image_name)
+
 if __name__ == '__main__':
     # 图像和标签文件夹
-    dataset_path = "./my_origindata"    # YOLO数据集根目录
-    save_path = "./my_origindata/Augumentation"    # 结果保存位置路径
+    dataset_path = "./my_origindata_0505"    # YOLO数据集根目录
+    save_path = "./my_origindata_0505/Augumentation"    # 结果保存位置路径
 
     # 运行
     runAugumentation(dataset_path, save_path)
