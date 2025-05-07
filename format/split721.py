@@ -7,19 +7,16 @@ from tqdm import tqdm
 """
 
 
-def split_img(img_path, label_path, split_list):
+def split_img(img_path, label_path, split_list, output_path):
     try:
-        Data = './my_origindata/Augumentation/splited/'
-        # Data是你要将要创建的文件夹路径（路径一定是相对于你当前的这个脚本而言的）
-        # os.mkdir(Data)
 
-        train_img_dir = Data + '/train/images'
-        val_img_dir = Data + '/val/images'
-        test_img_dir = Data + '/test/images'
+        train_img_dir = output_path + '/train/images'
+        val_img_dir = output_path + '/val/images'
+        test_img_dir = output_path + '/test/images'
 
-        train_label_dir = Data + '/train/labels'
-        val_label_dir = Data + '/val/labels'
-        test_label_dir = Data + '/test/labels'
+        train_label_dir = output_path + '/train/labels'
+        val_label_dir = output_path + '/val/labels'
+        test_label_dir = output_path + '/test/labels'
 
         # 创建文件夹
         os.makedirs(train_img_dir)
@@ -69,8 +66,9 @@ def toLabelPath(img_path, label_path):
 
 
 if __name__ == '__main__':
-    img_path = './my_origindata/Augumentation/images'  # 你的图片存放的路径（路径一定是相对于你当前的这个脚本文件而言的）
-    label_path = './my_origindata/Augumentation/labels'  # 你的txt文件存放的路径（路径一定是相对于你当前的这个脚本文件而言的）
+    img_path = './my_originoutput_path_0506/Augumentation/images'  # 你的图片存放的路径（路径一定是相对于你当前的这个脚本文件而言的）
+    label_path = './my_originoutput_path_0506/Augumentation/labels'  # 你的txt文件存放的路径（路径一定是相对于你当前的这个脚本文件而言的）
+    output_path = './my_originoutput_path_0506/Augumentation/splited/'
 
     split_list = [0.7, 0.2, 0.1]  # 数据集划分比例[train:val:test]
-    split_img(img_path, label_path, split_list)
+    split_img(img_path, label_path, split_list, output_path)
